@@ -25,6 +25,7 @@
 use core::alloc::{AllocError, Allocator, GlobalAlloc, Layout};
 use core::intrinsics;
 use core::ptr::{self, NonNull};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 // The minimum alignment guaranteed by the architecture. This value is used to
 // add fast paths for low alignment values. In practice, the alignment is a
@@ -36,6 +37,9 @@ const MIN_ALIGN: usize = 8;
 // https://github.com/intel/linux-sgx/blob/master/sdk/tlibc/stdlib/malloc.c#L541
 #[cfg(target_arch = "x86_64")]
 const MIN_ALIGN: usize = 16;
+
+// TODO: Make it a feature.
+static HEAP_MEM_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 pub struct System;
 
@@ -103,6 +107,10 @@ impl System {
                 Ok(new_ptr)
             }
         }
+    }
+
+    pub fn get_heap_size_in_use() -> usize {
+        HEAP_MEM_COUNTER.load(Ordering::Relaxed)
     }
 }
 
@@ -229,6 +237,7 @@ mod platform {
     unsafe impl GlobalAlloc for System {
         #[inline]
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            HEAP_MEM_COUNTER.fetch_add(layout.size(), Ordering::Relaxed);
             if layout.align() <= MIN_ALIGN && layout.align() <= layout.size() {
                 libc::malloc(layout.size()) as *mut u8
             } else {
@@ -238,6 +247,7 @@ mod platform {
 
         #[inline]
         unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            HEAP_MEM_COUNTER.fetch_add(layout.size(), Ordering::Relaxed);
             if layout.align() <= MIN_ALIGN && layout.align() <= layout.size() {
                 libc::calloc(layout.size(), 1) as *mut u8
             } else {
@@ -251,11 +261,14 @@ mod platform {
 
         #[inline]
         unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+            HEAP_MEM_COUNTER.fetch_sub(_layout.size(), Ordering::Relaxed);
             libc::free(ptr as *mut c_void)
         }
 
         #[inline]
         unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            HEAP_MEM_COUNTER.fetch_sub(layout.size(), Ordering::Relaxed);
+            HEAP_MEM_COUNTER.fetch_add(new_size, Ordering::Relaxed);
             if layout.align() <= MIN_ALIGN && layout.align() <= new_size {
                 libc::realloc(ptr as *mut c_void, new_size) as *mut u8
             } else {
